@@ -1,0 +1,482 @@
+#!/usr/bin/env python
+
+"""
+This script automates parallelisation of Dsuite Dtrios/ Dsuite DtriosCombine.
+This script was tested with python 2.7 and 3.6. It only uses standard 
+python libraries. Hence it should run on most systems with a standard 
+python installation.
+"""
+
+from __future__ import (print_function, unicode_literals, division)
+
+import os, sys
+import subprocess
+from multiprocessing import Pool
+import argparse
+import logging
+
+
+
+logger = logging.getLogger()
+logging.basicConfig(format='%(levelname)-8s %(asctime)s  %(message)s')
+#logging.basicConfig(format='%(levelname)-8s %(asctime)s %(funcName)20s()  %(message)s')
+logger.setLevel(logging.DEBUG)
+
+
+out_prefix = 'DTparallel'
+
+
+def get_n_snps(vcf_fn):
+    """
+    Gets the number of variants in the VCF file.
+    """
+    vcf_ext = os.path.splitext(vcf_fn)[-1]
+    catfun = 'gzip -dc' if vcf_ext in ['.gz','.bz'] else 'cat'
+    
+
+
+    command = '{catfun} {vcf_fn} | grep -v "^#" | wc -l'.format(catfun=catfun, vcf_fn=vcf_fn)
+    p = subprocess.Popen(command,
+                     shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    n_snps, err = p.communicate(b"input data that is passed to subprocess' stdin")
+    if p.returncode:
+        #logging.error('{e}'.format(e=e))
+        raise subprocess.CalledProcessError(p.returncode, command)
+
+    n_snps = int(n_snps)
+
+
+    return n_snps
+        
+
+
+def run_command(command_str):
+    p = subprocess.Popen(command_str,
+                         shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    o, e = p.communicate()
+    rc = p.returncode
+    return rc, o, e
+
+
+def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=None, JKnum=None,
+                  JKwindow=None,
+                  n_snps=None, dsuite_path='', environment_setup='',
+                  use_genotype_probabilities=False,
+                  pool_seq=None
+                  ):
+
+    if run_name is None:
+        run_str = ''
+    else:
+        run_str = "--run-name {}".format(run_name)
+
+
+    if tree_fn is None:
+        tree_str = ''
+    else:
+        tree_str = "--tree {}".format(tree_fn)
+
+    if JKnum is None:
+        jknum_str = ""
+    else:
+        jknum_str = "--JKnum {}".format(JKnum)
+
+    if JKwindow is None:
+        jkwindow_str = ""
+    else:
+        jkwindow_str = "--JKwindow {}".format(JKwindow)
+
+    if use_genotype_probabilities:
+        gt_prob_str = "--use-genotype-probabilities"
+    else:
+        gt_prob_str = ""
+
+    if pool_seq is not None:
+        pool_seq_str = "--pool-seq {}".format(pool_seq)
+    else:
+        pool_seq_str = ""
+
+    sets_base = os.path.splitext(sets_fn)[0]
+
+    pool = Pool(n_cores)
+
+
+    if n_snps is None:
+        logging.info("Checking number of variants in vcf file(s)")
+        snp_map = pool.map_async(get_n_snps, vcf_fns)
+        n_snps = snp_map.get()
+        logging.info("Lines in in vcf file(s): {n_snps}".format(n_snps=n_snps))
+
+    assert len(n_snps) == len(vcf_fns)
+
+    if dsuite_path and dsuite_path[-1] != '/':
+        dsuite_path += '/'
+
+    #determine number of chunks per vcf file based on cpus per file and line numbers
+    chunks_per_file = [1] * len(vcf_fns)
+    for i in range(len(vcf_fns), n_cores):
+        lines_per_chunk = [1. * a / b for a, b in zip(n_snps, chunks_per_file)]
+        most_lines_per_core = lines_per_chunk.index(max(lines_per_chunk))
+        chunks_per_file[most_lines_per_core] += 1
+
+    lines_per_chunk = [int(1. * a / b) + 1 for a, b in zip(n_snps, chunks_per_file)]
+
+    params = []
+    i = 0
+    for fn, n_snp, n_lines, n_chunks in zip(vcf_fns, n_snps, lines_per_chunk, chunks_per_file):
+        if n_chunks == 1:
+            params.append((i, fn, 0, 'all'))
+            i += 1
+        else:
+            for start in range(1, n_snp, n_lines):
+                params.append( (i, fn, start, n_lines))
+                i += 1
+
+    def get_command_str(i, vcf_fn, start, n_lines):
+        
+        if out_prefix is None:
+            out_prefix = sets_base
+        out_base = out_prefix + '_' + str(i)
+
+        if n_lines == 'all':
+            region_str = ""
+        else:
+            region_str = "--region={start},{n_lines}".format(start=start, n_lines=n_lines)
+
+        command_str = (
+        '{environment_setup} {dsuite_path}Dsuite Dtrios --out-prefix {out_base} {run_str} {tree_str} {jknum_str}'
+        '{jkwindow_str} {gt_prob_str} {pool_seq_str} {region_str} {vcf_fn} {sets_fn}'.format(
+            environment_setup=environment_setup, dsuite_path=dsuite_path,
+            run_str=run_str, tree_str=tree_str,
+            jknum_str=jknum_str, jkwindow_str=jkwindow_str, region_str=region_str,
+            vcf_fn=vcf_fn, sets_fn=sets_fn,
+            gt_prob_str=gt_prob_str, pool_seq_str=pool_seq_str, out_base=out_base))
+        return command_str
+
+
+    logging.info("Parallelizing {n_vcfs} vcf files across {n_cores} cores. "
+                 "Using the following numbers of chunks per file based on line-numbers: {chunks_per_file}.".format(n_vcfs=len(vcf_fns),
+                                                                                                    n_cores=n_cores,
+                                                                                                    chunks_per_file=chunks_per_file))
+
+    dtrios_commnands = [get_command_str(*p) for p in params]
+
+    for c in dtrios_commnands:
+        logging.info('Starting process: {command_str}'.format(command_str=c))
+
+    
+    map_dsuite = pool.map_async(run_command, dtrios_commnands)
+
+    results = map_dsuite.get()
+
+    for (rc, o, e), c, (run_id, fn, start, n_lines) in zip(results, dtrios_commnands, params):
+        o = o.decode('utf-8')
+        e = e.decode('utf-8')
+        if o:
+            logging.debug(o)
+        if rc:
+            logging.error(e)
+            raise subprocess.CalledProcessError(rc, c)
+        else:
+            if e:
+                logging.debug('{e}'.format(e=e))
+            logging.info('Successfully finished process for parameters: fn={fn},'
+                         ' start={start}, n_lines={n_lines}'.format(fn=fn, start=start, n_lines=n_lines))
+            #print('------------------------------------------------------', file=sys.stderr)
+    
+    return params
+    
+def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
+                   remove_intermediate_files=True, dsuite_path='',  environment_setup=''):
+    """
+    Combine Dsuite Dtrios runs run with dsuite_dtrios()
+    :param params: This should be a list of tuples of length three,
+                    each containing combinations of (n_run, vcf_fn, start, n_lines)
+    :param run_name:
+    :param sets_fn:
+    :param tree_fn:
+    :param remove_intermediate_files:
+    :param dsuite_path:
+    :param environment_setup:
+    :return: Returncode of the Dsuite DtriosCombine command. (0 if no error)
+    """
+    
+    extensions = ['_combine.txt', '_combine_stderr.txt', '_BBAA.txt', '_Dmin.txt']
+    
+    sets_dir = os.path.dirname(os.path.abspath(sets_fn))
+    sets_fn1 = os.path.basename(sets_fn)
+    sets_base = os.path.splitext(sets_fn1)[0]
+
+    if out_prefix is None:
+        out_prefix = sets_base
+
+    if dsuite_path and dsuite_path[-1] != '/':
+        dsuite_path += '/'
+
+    if run_name is None:
+        run_str = ""
+        run_name = ""
+    else:
+        run_str = "--run-name " + run_name
+
+    if tree_fn is None:
+        tree_str = ''
+    else:
+        tree_str = "--tree {}".format(tree_fn)
+
+    outbases = []
+
+
+    for (n_run, vcf_fn, start, n_lines) in params:
+        if n_lines == 'all':
+            region_str = ''
+        else:
+            region_str = "_{s}_{e}".format(s=start,e=start + n_lines)
+
+        outbase =  '{out_prefix}_{n_run}_{run_name}{region_str}'.format(out_prefix=out_prefix,
+                                                                   n_run=n_run,run_name=run_name,
+                                                                       region_str=region_str)
+        outbases.append(outbase)
+
+
+    combine_command = 'cd {sets_dir}; {environment_setup} {dsuite_path}Dsuite DtriosCombine --out-prefix {out_prefix}_{sets_base} {run_str} {tree_str} '.format(
+                        out_prefix = out_prefix,
+                        sets_base=sets_base,
+                        sets_dir=sets_dir,
+                        environment_setup=environment_setup, dsuite_path=dsuite_path, run_str=run_str, tree_str=tree_str) \
+                        + ' '.join(outbases)
+
+
+    #print('------------------------------------------------------', file=sys.stderr)
+    logging.info('Combining output from {} runs with: '.format(len(params)) + combine_command)
+
+    p = subprocess.Popen(combine_command,
+                         shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    o, e = p.communicate()
+    o = o.decode('utf-8')
+    e = e.decode('utf-8')
+    if o:
+        print(o, file=sys.stdout)
+    if p.returncode:
+        if e:
+            logging.error(e)
+        raise subprocess.CalledProcessError(p.returncode, combine_command)
+    else:
+        if e:
+            logging.debug(e)
+            logging.info('Successfully combined {} runs into output files'
+              ' with base {}'.format(len(params),
+                                                os.path.join(sets_dir,out_prefix + '_' + sets_base + '_' +
+                                                            run_name+'_combined_*')))
+
+
+
+    #print('------------------------------------------------------', file=sys.stderr)
+
+    if remove_intermediate_files:
+        
+        logging.info('Removing intermediate files.')
+        intermediate_files = []
+        for b in outbases:
+            for ex in extensions:
+                intermediate_files.append(b+ex)
+
+        p = subprocess.Popen('cd {}; rm {}'.format(sets_dir, ' '.join(intermediate_files)),
+                             shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        o, e = p.communicate()
+        o = o.decode('utf-8')
+        e = e.decode('utf-8')
+        if o:
+            print(o, file=sys.stdout)
+        if p.returncode:
+            logging.error(e)
+
+    return p.returncode 
+
+
+
+
+def main():
+
+
+    class SplitArgs(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, [int(s) for s in values.split(',')])
+
+
+    parser = argparse.ArgumentParser(description=("This python script automates parallelisation of Dsuite Dtrios/ Dsuite DtriosCombine. "
+                                                  "The usage is analogous to Dsuite Dtrios but computation is performed "
+                                                  " on multiple cores (default: number of available CPUs). "
+                                                  "ATTENTION: The order of SETS.txt and INPUT_FILE.vcf is swapped compared "
+                                                  " to Dsuite Dtrios. This is so that multiple VCF input files can be provided. "
+                                                  "All vcf files should have the same samples, (e.g., different chromosomes "
+                                                  "of the same callset)."
+                                                  " Output_files are  placed in the same folder as as the the SETS.txt file "
+                                                  " and named DTParallel_<SETS_basename>_<run_name>_combined_BBAA.txt etc."
+                                                  "This script should run on most systems with a standard python installation "
+                                                  "(tested with python 2.7 and 3.6)."))
+    parser.add_argument("sets_fn", metavar="SETS.txt",
+                        help=("The SETS.txt should have two columns: SAMPLE_ID    SPECIES_ID\n"
+                        "The outgroup (can be multiple samples) should be specified by using the "
+                        "keyword Outgroup in place of the SPECIES_ID"))
+
+
+
+    parser.add_argument("vcf_fns", metavar="INPUT_FILE.vcf", nargs='+', help="One or more whitespace separated SNP vcf files.")
+
+
+
+    #DSUITE options
+    parser.add_argument("-k", "--JKnum", type=int,
+                                help=("(default=20) the number of Jackknife blocks to divide the dataset into;"
+                                      " should be at least 20 for the whole dataset"),
+                                                        default=None)
+    parser.add_argument("-j", "--JKwindow", type=int,
+                                help=("Jackknife block size in number of informative SNPs (as used in v0.2)"
+                                      " when specified, this is used in place of the --JKnum option"),
+                                                        required=False)
+
+    parser.add_argument("-t", "--tree", type=str,
+                        help=("a file with a tree in the newick format specifying the relationships between populations/species"
+                             " D and f4-ratio values for trios arranged according to the tree will be output in a file with _tree.txt suffix"),
+                        required=False)
+
+    parser.add_argument("-n", "--run-name", type=str,
+                        help="run-name will be included in the output file name",
+                        required=False)
+
+    parser.add_argument("-l",metavar='NUMLINES',
+                                help=("(optional) the number of lines (SNPs) in the VCF input(s) - speeds up operation if known. "
+                                      " If N INPUT_FILE.vcf files are provided, there must be N comma-separated integers provided "
+                                      "without whitespace between them."
+                                      ),
+                                                        default=None,action=SplitArgs)
+
+    parser.add_argument("-g", "--use-genotype-probabilities", action='store_true',
+                        help=("(optional) use probabilities (GP tag) or calculate them from "
+                              "likelihoods (GL or PL tags) using a Hardy-Weinberg prior"))
+
+    parser.add_argument("-p", "--pool-seq", metavar="--pool-seq=MIN_DEPTH", type=int,
+                                help=("(default=20) the number of Jackknife blocks to divide the dataset into;"
+                                      " should be at least 20 for the whole dataset"),
+                                                        default=None)
+
+
+
+    # DtriosParallel specific options
+    parser.add_argument("--cores", type=int,
+                                help=("(default=CPU count) Number of Dsuite Dtrios processes run in parallel."),
+                                                        default=None)
+    parser.add_argument( "--keep-intermediate", action='store_true',
+                        help="Keep region-wise Dsuite Dtrios results.")
+    parser.add_argument('--logging_level','-v',
+                                    choices=['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+                                                            default='INFO',
+                                                            help='Minimun level of logging.')
+    parser.add_argument('--dsuite-path',type=str, required=False,
+                        help="Explicitly set the path to the directory in which Dsuite is located. By default the script will first check"
+                            " whether Dsuite is accessible from $PATH. "
+                             " If not it will try to locate Dsuite at ../Build/Dsuite.")
+    parser.add_argument('--environment-setup',type=str, required=False,
+                        help="Command that should be run to setup the environment for Dsuite. E.g., 'module load GCC' or 'conda activate'")
+    parser.add_argument("-c", "--no-combine", action='store_true',
+                        help=("(optional) do not run DtriosCombine to obtain a single combined results file"))
+
+
+    args, unknown = parser.parse_known_args()
+
+
+
+    logger.setLevel(getattr(logging, args.logging_level))
+
+
+    if unknown:
+        logger.warning("The following unrecognized arguments are not used: {}".format(unknown))
+
+    if args.sets_fn.endswith('vcf.gz') or args.sets_fn.endswith('vcf'):
+        parser.print_usage()
+        print('\n')
+        raise Exception("SETS.txt file seems to have a vcf extension. "
+                        "Note that the SETS.txt file should be in the command line before the INPUT_FILE.vcf file(s)."
+                        "The order is swapped compared to Dsuite Dtrios to allow for multiple vcf files. "
+                        "\nThis is the sets filename: {}".format(args.sets_fn))
+
+
+    def which(program):
+        def is_exe(fpath):
+            return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+        fpath, fname = os.path.split(program)
+        if fpath:
+            if is_exe(program):
+                return program
+        else:
+            for path in os.environ["PATH"].split(os.pathsep):
+                exe_file = os.path.join(path, program)
+                if is_exe(exe_file):
+                    return exe_file
+
+        return None
+
+
+    #check whether Dsuite is accessible
+    if args.dsuite_path is None:
+        dsuite_path = which("Dsuite")
+        if dsuite_path is not None:
+            args.dsuite_path = ''
+        else: 
+            args.dsuite_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', 'Build'))
+
+    if args.environment_setup is None:
+        args.environment_setup = ""
+    else:
+        args.environment_setup += ';'
+    
+    if args.cores is None:
+
+        if sys.version_info[0] < 3:
+            import multiprocessing
+            args.cores = multiprocessing.cpu_count()
+        else:
+            args.cores = os.cpu_count()
+    if args.JKwindow is not None:
+        args.JKnum = None
+
+    vcf_fns = [os.path.abspath(vcf_fn) for vcf_fn in args.vcf_fns]
+    sets_fn = os.path.abspath(args.sets_fn)
+    if args.tree is not None:
+        args.tree = os.path.abspath(args.tree)
+
+
+    if args.l is not None:
+        assert len(args.l) == len(vcf_fns), ("Comma separated line numbers provided do "
+                                            "not match number of INPUT_FILE.vcf files provided. Line numbers: {}; Vcf files: {}".format(args.l, args.vcf_fns))
+
+
+
+
+    params  = dsuite_dtrios(vcf_fns, sets_fn, args.run_name, args.cores, tree_fn=args.tree,
+                                            n_snps=args.l, JKnum=args.JKnum, JKwindow=args.JKwindow,dsuite_path=args.dsuite_path,
+                                            environment_setup=args.environment_setup,
+                                           use_genotype_probabilities=args.use_genotype_probabilities,
+                                            pool_seq=args.pool_seq)
+
+    #lines_per_core = int(n_snps * 1. / args.cores) + 1
+    #starts = range(1, n_snps, lines_per_core)
+
+    if not args.no_combine:
+        rc = dsuite_combine(params , args.run_name, sets_fn, tree_fn=args.tree,
+                            remove_intermediate_files=not args.keep_intermediate, dsuite_path=args.dsuite_path,
+                                                                        environment_setup=args.environment_setup)
+
+    else:
+        rc = 0
+
+    return rc
+
+
+if __name__ == "__main__":
+        sys.exit(main())
+

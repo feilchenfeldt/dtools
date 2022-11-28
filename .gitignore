@@ -1,0 +1,5 @@
+**/output/
+**/_data
+**/.snakemake
+**/logs
+

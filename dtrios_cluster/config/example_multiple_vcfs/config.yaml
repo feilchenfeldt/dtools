@@ -1,0 +1,24 @@
+
+##### INPUT VCF definition #####
+# out-comment one of the two below options as appropriate
+
+## either provide a single vcf (gzipped and with tbi index) and a list of chromosomes/contigs
+# (one job per chromosome, each jobs used {threads} in parallel
+#vcf: [../../test_data/test_two_chroms.vcf.gz]
+#chromosomes: [1, 2]
+
+## or provide a list of vcfs
+# (one job per vcf, each jobs used {threads} in parallel
+vcfs: [../test_data/test_chr1.vcf.gz,
+        ../test_data/test_chr2.vcf.gz]
+n_splits: 10
+
+
+
+#only
+#walltime:
+#mem_gb:
+
+
+
+

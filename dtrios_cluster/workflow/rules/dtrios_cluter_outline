@@ -1,0 +1,38 @@
+
+
+
+
+
+#run for each chromosomes/vcfs * chrom_chunks
+rule create_trio_chunks:
+    input:
+        _combine file per chromosomes/vcfs  and chrom_chunks (wildcards)
+        _stderr file per chromosomes/vcfs  and chrom_chunks (wildcards)
+    params:
+        n_chunks=10
+    output:
+        trio_chunked _combine files per chromosomes/vcfs and chrom_chunks (wildcards)
+        trio_chunked _stderr files per chromosomes/vcfs and chrom_chunks (wildcards)
+
+
+problem here: names of chrom_chunks a priori unknown
+if several vcf files are given DtriosParallel adjust chunk number per file according to lines in the file.
+
+this can be fixed by changing Dtrios_parallel to name them by chunk order rather than line
+or by
+number of chunks corresponds to number of threads?
+
+# run for each trio_chunk
+rule combine_per_trio_chunk:
+    input:
+        expand(_combine files trio_chunk (wildcard), all chromosomes/vcfs * chrom_chunks)
+        expand(_stderr files per trio_chunk (wildcard), all chromosomes/vcfs * chrom_chunks)
+    output:
+        BBAA per trio_chunk
+
+#run once
+rule concat_combined_drios:
+    input:
+        expand(BBAA per trio_chunk, chunks)
+    output:
+        BBAA for all trios

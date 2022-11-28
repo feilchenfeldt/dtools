@@ -1,0 +1,21 @@
+import os
+
+configfile: "../config/common_config.yaml"
+
+try:
+    analysis = config['analysis']
+except KeyError:
+    raise Exception("Please set analysis name in ../config/common_config.yaml or at the command line, e.g.: "
+                        "Run 'snakemake --config analysis=<my_analysis> ...'")
+
+config_fn = f"../config/{analysis}/config.yaml"
+assert os.path.exists(config_fn), f"Please create config file for your analysis: {config_fn}"
+configfile: config_fn
+
+
+
+rule all:
+    input:
+        f"../output/{analysis}/BBAA_check_passed.txt"
+
+include: "rules/dtrios_cluster.smk"

@@ -1,0 +1,10 @@
+analysis: example_multiple_vcfs
+dsuite_path: /data/antwerpen/205/vsc20518/hannes.svardal@gmail.com/script/Dsuite/Build
+
+cores_per_node: 20
+#it makes sense to set the number of nodes equal to the number of vcf files/ chromsosomes
+
+remove_intermediate: True
+
+
+
