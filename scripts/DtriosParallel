@@ -23,7 +23,7 @@ logging.basicConfig(format='%(levelname)-8s %(asctime)s  %(message)s')
 logger.setLevel(logging.DEBUG)
 
 
-out_prefix = 'DTparallel'
+#out_prefix = 'DTparallel'
 
 
 def get_n_snps(vcf_fn):
@@ -58,7 +58,7 @@ def run_command(command_str):
     return rc, o, e
 
 
-def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=None, JKnum=None,
+def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, intermediate_prefix=None, tree_fn=None, JKnum=None,
                   JKwindow=None,
                   n_snps=None, dsuite_path='', environment_setup='',
                   use_genotype_probabilities=False,
@@ -97,9 +97,10 @@ def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=
         pool_seq_str = ""
 
     sets_base = os.path.splitext(sets_fn)[0]
+    if intermediate_prefix is None:
+        intermediate_prefix = sets_base
 
     pool = Pool(n_cores)
-
 
     if n_snps is None:
         logging.info("Checking number of variants in vcf file(s)")
@@ -133,10 +134,8 @@ def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=
                 i += 1
 
     def get_command_str(i, vcf_fn, start, n_lines):
-        
-        if out_prefix is None:
-            out_prefix = sets_base
-        out_base = out_prefix + '_' + str(i)
+
+        out_base = intermediate_prefix + '_' + str(i)
 
         if n_lines == 'all':
             region_str = ""
@@ -147,12 +146,12 @@ def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=
         '{environment_setup} {dsuite_path}Dsuite Dtrios --out-prefix {out_base} {run_str} {tree_str} {jknum_str}'
         '{jkwindow_str} {gt_prob_str} {pool_seq_str} {region_str} {vcf_fn} {sets_fn}'.format(
             environment_setup=environment_setup, dsuite_path=dsuite_path,
+            out_base=out_base,
             run_str=run_str, tree_str=tree_str,
             jknum_str=jknum_str, jkwindow_str=jkwindow_str, region_str=region_str,
             vcf_fn=vcf_fn, sets_fn=sets_fn,
-            gt_prob_str=gt_prob_str, pool_seq_str=pool_seq_str, out_base=out_base))
+            gt_prob_str=gt_prob_str, pool_seq_str=pool_seq_str))
         return command_str
-
 
     logging.info("Parallelizing {n_vcfs} vcf files across {n_cores} cores. "
                  "Using the following numbers of chunks per file based on line-numbers: {chunks_per_file}.".format(n_vcfs=len(vcf_fns),
@@ -186,7 +185,7 @@ def dsuite_dtrios(vcf_fns, sets_fn, run_name, n_cores, out_prefix=None, tree_fn=
     
     return params
     
-def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
+def dsuite_combine(params, run_name, sets_fn, out_prefix=None, intermediate_prefix=None, tree_fn=None,
                    remove_intermediate_files=True, dsuite_path='',  environment_setup=''):
     """
     Combine Dsuite Dtrios runs run with dsuite_dtrios()
@@ -206,6 +205,8 @@ def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
     sets_dir = os.path.dirname(os.path.abspath(sets_fn))
     sets_fn1 = os.path.basename(sets_fn)
     sets_base = os.path.splitext(sets_fn1)[0]
+    if intermediate_prefix is None:
+        intermediate_prefix = sets_base
 
     if out_prefix is None:
         out_prefix = sets_base
@@ -224,7 +225,7 @@ def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
     else:
         tree_str = "--tree {}".format(tree_fn)
 
-    outbases = []
+    intermediatebases = []
 
 
     for (n_run, vcf_fn, start, n_lines) in params:
@@ -233,18 +234,17 @@ def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
         else:
             region_str = "_{s}_{e}".format(s=start,e=start + n_lines)
 
-        outbase =  '{out_prefix}_{n_run}_{run_name}{region_str}'.format(out_prefix=out_prefix,
+        intermediatebase =  '{intermediate_prefix}_{n_run}_{run_name}{region_str}'.format(intermediate_prefix=intermediate_prefix,
                                                                    n_run=n_run,run_name=run_name,
                                                                        region_str=region_str)
-        outbases.append(outbase)
+        intermediatebases.append(intermediatebase)
 
 
-    combine_command = 'cd {sets_dir}; {environment_setup} {dsuite_path}Dsuite DtriosCombine --out-prefix {out_prefix}_{sets_base} {run_str} {tree_str} '.format(
+    combine_command = 'cd {sets_dir}; {environment_setup} {dsuite_path}Dsuite DtriosCombine --out-prefix {out_prefix} {run_str} {tree_str} '.format(
                         out_prefix = out_prefix,
-                        sets_base=sets_base,
                         sets_dir=sets_dir,
                         environment_setup=environment_setup, dsuite_path=dsuite_path, run_str=run_str, tree_str=tree_str) \
-                        + ' '.join(outbases)
+                        + ' '.join(intermediatebases)
 
 
     #print('------------------------------------------------------', file=sys.stderr)
@@ -278,7 +278,7 @@ def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
         
         logging.info('Removing intermediate files.')
         intermediate_files = []
-        for b in outbases:
+        for b in intermediatebases:
             for ex in extensions:
                 intermediate_files.append(b+ex)
 
@@ -299,7 +299,6 @@ def dsuite_combine(params, run_name, sets_fn, out_prefix=None,  tree_fn=None,
 
 
 def main():
-
 
     class SplitArgs(argparse.Action):
         def __call__(self, parser, namespace, values, option_string=None):
@@ -351,8 +350,7 @@ def main():
                                 help=("(optional) the number of lines (SNPs) in the VCF input(s) - speeds up operation if known. "
                                       " If N INPUT_FILE.vcf files are provided, there must be N comma-separated integers provided "
                                       "without whitespace between them."
-                                      ),
-                                                        default=None,action=SplitArgs)
+                                      ), default=None, action=SplitArgs)
 
     parser.add_argument("-g", "--use-genotype-probabilities", action='store_true',
                         help=("(optional) use probabilities (GP tag) or calculate them from "
@@ -360,8 +358,7 @@ def main():
 
     parser.add_argument("-p", "--pool-seq", metavar="--pool-seq=MIN_DEPTH", type=int,
                                 help=("(default=20) the number of Jackknife blocks to divide the dataset into;"
-                                      " should be at least 20 for the whole dataset"),
-                                                        default=None)
+                                      " should be at least 20 for the whole dataset"),default=None)
 
 
 
@@ -383,14 +380,13 @@ def main():
                         help="Command that should be run to setup the environment for Dsuite. E.g., 'module load GCC' or 'conda activate'")
     parser.add_argument("-c", "--no-combine", action='store_true',
                         help=("(optional) do not run DtriosCombine to obtain a single combined results file"))
-
+    parser.add_argument("--intermediate-prefix", required=False,
+                        help=("(default = set.txt file base) use this (file path/ name) as prefix for intermediate chunked files."))
+    parser.add_argument("--out-prefix", required=False,
+                        help=("(default = set.txt file base) use this (file path/ name) as prefix for output file."))
 
     args, unknown = parser.parse_known_args()
-
-
-
     logger.setLevel(getattr(logging, args.logging_level))
-
 
     if unknown:
         logger.warning("The following unrecognized arguments are not used: {}".format(unknown))
@@ -402,7 +398,6 @@ def main():
                         "Note that the SETS.txt file should be in the command line before the INPUT_FILE.vcf file(s)."
                         "The order is swapped compared to Dsuite Dtrios to allow for multiple vcf files. "
                         "\nThis is the sets filename: {}".format(args.sets_fn))
-
 
     def which(program):
         def is_exe(fpath):
@@ -420,14 +415,13 @@ def main():
 
         return None
 
-
     #check whether Dsuite is accessible
     if args.dsuite_path is None:
         dsuite_path = which("Dsuite")
         if dsuite_path is not None:
             args.dsuite_path = ''
         else: 
-            args.dsuite_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', 'Build'))
+            args.dsuite_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '../dtools', 'Build'))
 
     if args.environment_setup is None:
         args.environment_setup = ""
@@ -444,6 +438,15 @@ def main():
     if args.JKwindow is not None:
         args.JKnum = None
 
+    if args.intermediate_prefix is not None:
+        args.intermediate_prefix = os.path.abspath(args.intermediate_prefix)
+        os.makedirs(os.path.dirname(args.intermediate_prefix), exist_ok=True)
+
+
+    if args.out_prefix is not None:
+        args.out_prefix = os.path.abspath(args.out_prefix)
+        os.makedirs(os.path.dirname(args.out_prefix), exist_ok=True)
+
     vcf_fns = [os.path.abspath(vcf_fn) for vcf_fn in args.vcf_fns]
     sets_fn = os.path.abspath(args.sets_fn)
     if args.tree is not None:
@@ -457,7 +460,7 @@ def main():
 
 
 
-    params  = dsuite_dtrios(vcf_fns, sets_fn, args.run_name, args.cores, tree_fn=args.tree,
+    params  = dsuite_dtrios(vcf_fns, sets_fn, args.run_name, args.cores, intermediate_prefix=args.intermediate_prefix,tree_fn=args.tree,
                                             n_snps=args.l, JKnum=args.JKnum, JKwindow=args.JKwindow,dsuite_path=args.dsuite_path,
                                             environment_setup=args.environment_setup,
                                            use_genotype_probabilities=args.use_genotype_probabilities,
@@ -467,7 +470,8 @@ def main():
     #starts = range(1, n_snps, lines_per_core)
 
     if not args.no_combine:
-        rc = dsuite_combine(params , args.run_name, sets_fn, tree_fn=args.tree,
+        rc = dsuite_combine(params , args.run_name, sets_fn, out_prefix=args.out_prefix,
+                            intermediate_prefix=args.intermediate_prefix, tree_fn=args.tree,
                             remove_intermediate_files=not args.keep_intermediate, dsuite_path=args.dsuite_path,
                                                                         environment_setup=args.environment_setup)
 
